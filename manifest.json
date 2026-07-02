@@ -1,0 +1,16 @@
+{
+  "name": "Claude Todo Orchestrator",
+  "short_name": "ClaudeTodo",
+  "description": "4대 노드 LLM 작업 오케스트레이션 제어판",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#6d28d9",
+  "background_color": "#0f172a",
+  "lang": "ko",
+  "icons": [
+    { "src": "./icon-192.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "./icon-512.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

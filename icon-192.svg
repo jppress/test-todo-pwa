@@ -1,0 +1,7 @@
+<!-- placeholder 아이콘. 프로덕션 설치성(특히 iOS)을 위해 PNG 192/512 권장. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">
+  <rect width="192" height="192" rx="36" fill="#6d28d9"/>
+  <text x="96" y="118" font-family="Segoe UI, Arial, sans-serif" font-size="78"
+        font-weight="700" fill="#ffffff" text-anchor="middle">CT</text>
+  <circle cx="150" cy="46" r="14" fill="#22c55e"/>
+</svg>
