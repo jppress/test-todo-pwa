@@ -1,0 +1,15 @@
+{
+  "name": "내바 NAEBA",
+  "short_name": "내바",
+  "description": "스마트폰용 모아바",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#161616",
+  "background_color": "#1a1a19",
+  "lang": "ko",
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

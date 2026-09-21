@@ -1,0 +1,9 @@
+{
+  "pageSize": 5,
+  "pages": 5,
+  "internalMax": 10,
+  "menus": [
+    {"no": 1, "label": "노트북 사용", "icon": "💻", "view": "laptop"},
+    {"no": 11, "label": "클로드 사용량", "icon": "📈", "view": "claude"}
+  ]
+}

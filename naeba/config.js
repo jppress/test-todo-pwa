@@ -1,0 +1,1 @@
+window.NAEBA_CONFIG={"mode": "external", "lanUrl": "http://maegminiui-Macmini-2.local:15795", "drive": {"clientId": "24392133883-v8a6te5qapmi6bvak6lnv1r0k55fp955.apps.googleusercontent.com", "folderId": "1BKq4UvCTVPcnDhN-3P88A_YR8r4HNjNn", "fileName": "naeba_claude_usage.json"}};
