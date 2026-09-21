@@ -46,6 +46,8 @@ if (typeof document !== "undefined") {
     finally { clearTimeout(t); }
   }
 
+  const TODO_URL = CFG.todoUrl || "https://jppress.github.io/test-todo-pwa/"; // 같은 origin 의 todo PWA(외부 모드 홈에서만 노출)
+
   function topbar(title, back) {
     return el("div", { class: "topbar" },
       back ? el("button", { class: "ghost", onclick: () => { location.hash = ""; } }, "‹ 홈") : null,
@@ -69,7 +71,8 @@ if (typeof document !== "undefined") {
       const p = i + 1, a = (p - 1) * MENUS.pageSize + 1;
       return el("button", { class: p === page ? "active" : "", onclick: () => { localStorage.setItem(PAGE_KEY, p); renderHome(); } }, a + "~" + (a + MENUS.pageSize - 1));
     }));
-    $app.replaceChildren(topbar("내바"), el("div", { class: "home" }, col, pages));
+    const todoLink = INTERNAL ? null : el("a", { class: "ghost", href: TODO_URL, style: "display:block;padding:8px 12px;text-align:center;text-decoration:none" }, "‹ 할일(todo)로 돌아가기");
+    $app.replaceChildren(topbar("내바"), todoLink, el("div", { class: "home" }, col, pages));
   }
 
   function openMenu(m, internal) {
