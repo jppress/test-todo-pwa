@@ -147,6 +147,49 @@ if (typeof document !== "undefined") {
 
   // ----- 11번: 클로드 사용량 -----
   const SERIES = [["session_pct", "현재 세션", "var(--s1)"], ["weekly_pct", "주간 한도", "var(--s2)"], ["credit_pct", "크레딧", "var(--s3)"]];
+  const _WD = "일월화수목금토";
+  const _MON_NUM = { Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12 };
+
+  // 계정 슬롯 표시 라벨 — 내부 id(acct1/acct2, my21api의 browser_vm/browser_vm2)는 그대로 두고
+  // 화면 표시 텍스트만 "1번"/"2번"으로 통일한다(용도·경로 노출 최소화, 2026-09-23).
+  function displaySlotLabel(a) {
+    if (a.id === "acct1" || a.id === "browser_vm") return "1번";
+    if (a.id === "acct2" || a.id === "browser_vm2") return "2번";
+    return a.label || a.id;
+  }
+
+  // "2026-09-23T01:26[:38]" (서울 벽시계, 타임존 표기 없음) → "23일(수) 1시 26분"
+  function fmtGenAt(s) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(s || "");
+    if (!m) return s || "";
+    const [, y, mo, d, h, mi] = m;
+    const wd = _WD[new Date(Date.UTC(+y, +mo - 1, +d)).getUTCDay()];
+    return `${+d}일(${wd}) ${+h}시 ${+mi}분`;
+  }
+
+  // "Sep 23, 5pm (Asia/Seoul)" / "Sep 23, 5:30pm (Asia/Seoul)" → {wd, h(12시간제 숫자), mi|null}
+  function _parseResetStr(s) {
+    const m = /^([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{1,2})(?::(\d{2}))?\s*([ap])m/.exec(s || "");
+    if (!m) return null;
+    const [, mon, day, h, mi] = m;
+    const monNum = _MON_NUM[mon];
+    if (!monNum) return null;
+    const now = new Date();
+    let year = now.getUTCFullYear();
+    if (monNum < now.getUTCMonth() + 1 - 6) year += 1; // 연말→연초로 넘어가는 리셋 보정
+    const wd = _WD[new Date(Date.UTC(year, monNum - 1, +day)).getUTCDay()];
+    return { wd, h: +h, mi: mi ? +mi : null };
+  }
+  function fmtSessionReset(s) {
+    const p = _parseResetStr(s);
+    if (!p) return s || "";
+    return p.mi ? `${p.h}시 ${p.mi}분` : `${p.h}시`;
+  }
+  function fmtWeeklyReset(s) {
+    const p = _parseResetStr(s);
+    if (!p) return s || "";
+    return p.mi ? `${p.wd} ${p.h}시 ${p.mi}분` : `${p.wd} ${p.h}시`;
+  }
 
   function chart(acct) {
     const W = 640, H = 220, padL = 30, padB = 22, padT = 8, pw = W - padL - 6, ph = H - padT - padB, pts = acct.points;
@@ -155,7 +198,7 @@ if (typeof document !== "undefined") {
       const y = padT + ph * (1 - g / 100);
       s.append(svg("line", { class: "grid", x1: padL, x2: W - 6, y1: y, y2: y })); const t = svg("text", { x: 2, y: y + 3 }); t.textContent = g; s.append(t);
     }
-    if (pts.length < 2) { const t = svg("text", { x: W / 2, y: H / 2, "text-anchor": "middle" }); t.textContent = "데이터 없음"; s.append(t); return s; }
+    if (pts.length < 2) { const t = svg("text", { x: W / 2, y: H / 2, "text-anchor": "middle" }); t.textContent = "데이터 수집 중 — 다음 갱신에 표시됩니다"; s.append(t); return s; }
     const X = (i) => padL + chartX(i, pts.length, pw), Y = (v) => padT + ph * (1 - v / 100);
     const idx = Object.fromEntries(pts.map((p, i) => [p.t, i]));
     for (const r of acct.resets) {
@@ -168,7 +211,7 @@ if (typeof document !== "undefined") {
       pts.forEach((p, i) => { if (p[key] === null || p[key] === undefined) { pen = false; return; } d += (pen ? "L" : "M") + X(i).toFixed(1) + " " + Y(p[key]).toFixed(1); pen = true; });
       if (d) s.append(svg("path", { d, fill: "none", stroke: color, "stroke-width": 2 }));
     }
-    for (const i of [0, Math.floor(pts.length / 2), pts.length - 1]) { const t = svg("text", { x: X(i), y: H - 6, "text-anchor": i === 0 ? "start" : i === pts.length - 1 ? "end" : "middle" }); t.textContent = pts[i].t.slice(11); s.append(t); }
+    for (const i of [0, Math.floor(pts.length / 2), pts.length - 1]) { const t = svg("text", { class: "axis-t", x: X(i), y: H - 6, "text-anchor": i === 0 ? "start" : i === pts.length - 1 ? "end" : "middle" }); t.textContent = pts[i].t.slice(11, 16); s.append(t); }
     return s;
   }
 
@@ -176,8 +219,8 @@ if (typeof document !== "undefined") {
     const l = a.latest;
     const tiles = el("div", { class: "tiles" }, SERIES.map(([k, name, color]) => el("div", { class: "tile" },
       el("div", { class: "l" }, el("i", { class: "d", style: "background:" + color }), name), el("div", { class: "n" }, l ? fmtPct(l[k]) : "–"),
-      el("div", { class: "s" }, k === "session_pct" && l && l.session_reset ? "리셋 " + l.session_reset : k === "weekly_pct" && l && l.weekly_reset ? "리셋 " + l.weekly_reset : ""))));
-    return el("div", { class: "card" }, el("h2", {}, a.label), tiles, chart(a),
+      el("div", { class: "s" }, k === "session_pct" && l && l.session_reset ? fmtSessionReset(l.session_reset) : k === "weekly_pct" && l && l.weekly_reset ? fmtWeeklyReset(l.weekly_reset) : ""))));
+    return el("div", { class: "card" }, el("h2", {}, displaySlotLabel(a)), tiles, chart(a),
       el("div", { class: "legend" }, SERIES.map(([, n, c]) => el("span", {}, el("i", { style: "background:" + c }), n)), el("span", {}, "┆ 점선=리셋 시점")));
   }
 
@@ -200,12 +243,13 @@ if (typeof document !== "undefined") {
     return fetchJson("https://www.googleapis.com/drive/v3/files/" + list.files[0].id + "?alt=media", H);
   }
 
-  // my-21 외부 API 소스(Drive 대체 옵션) — my-70 browser-vm 자기 자신의 사용량, /usage 를 device_label
-  // 별로 묶어 기존 Drive/내부 스냅샷과 같은 모양(accounts[].points/resets/latest)으로 변환한다.
+  // my-21 외부 API 소스(Drive 대체 옵션) — my-70 browser-vm 자기 자신의 사용량, /l1(구 /usage,
+  // 2026-09-23 개명 — 외부에 기능명을 노출하지 않는다)을 device_label 별로 묶어 기존 Drive/내부
+  // 스냅샷과 같은 모양(accounts[].points/resets/latest)으로 변환한다.
   async function loadMy21ApiUsage() {
     const api = CFG.my21api || {};
     if (!api.url) throw new Error("my21api 연동이 아직 설정되지 않았습니다.");
-    const data = await fetchJson(api.url.replace(/\/$/, "") + "/usage?hours=10", { headers: { Authorization: "Bearer " + api.readToken } });
+    const data = await fetchJson(api.url.replace(/\/$/, "") + "/l1?hours=10", { headers: { Authorization: "Bearer " + api.readToken } });
     return toSnapshotShape(data.points || []);
   }
 
@@ -229,10 +273,16 @@ if (typeof document !== "undefined") {
         id: label, label,
         points: pts.map((p) => ({ t: p.ts, session_pct: p.session_pct, weekly_pct: p.weekly_pct, credit_pct: p.credit_pct })),
         resets,
-        latest: last ? { t: last.ts, session_pct: last.session_pct, weekly_pct: last.weekly_pct, credit_pct: last.credit_pct } : null,
+        latest: last ? { t: last.ts, session_pct: last.session_pct, weekly_pct: last.weekly_pct, credit_pct: last.credit_pct,
+                          session_reset: last.session_reset, weekly_reset: last.weekly_reset } : null,
       };
     });
-    return { generated_at: new Date().toISOString().slice(0, 19), window_hours: 10, step_min: 1, accounts };
+    // generated_at 은 내부(usage_snapshot.py) 스냅샷과 같은 모양(서울 벽시계, 타임존 표기 없음)
+    // 으로 맞춘다 — fmtGenAt() 가 소스에 상관없이 그대로 서울 시각으로 해석하게 하기 위함.
+    const seoulNow = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Seoul", hour12: false,
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      .format(new Date()).replace(" ", "T");
+    return { generated_at: seoulNow, window_hours: 10, step_min: 1, accounts };
   }
 
   async function fetchUsageSnapshot() {
@@ -245,7 +295,7 @@ if (typeof document !== "undefined") {
     $app.replaceChildren(topbar("📈 클로드 사용량", true), el("div", { class: "view" }, body));
     try {
       const snap = await fetchUsageSnapshot();
-      body.replaceChildren(el("div", { class: "note", style: "margin-bottom:10px" }, `최근 ${snap.window_hours}시간 · ${snap.step_min}분 간격 · 갱신 ${snap.generated_at.replace("T", " ")}`), ...snap.accounts.map(acctBlock));
+      body.replaceChildren(el("div", { class: "gen-at" }, `갱신 ${fmtGenAt(snap.generated_at)}`), ...snap.accounts.map(acctBlock));
     } catch (e) { body.replaceChildren(el("div", { class: "card state-err" }, "조회 실패: " + e.message)); }
   }
 
