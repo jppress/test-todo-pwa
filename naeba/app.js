@@ -200,11 +200,51 @@ if (typeof document !== "undefined") {
     return fetchJson("https://www.googleapis.com/drive/v3/files/" + list.files[0].id + "?alt=media", H);
   }
 
+  // my-21 외부 API 소스(Drive 대체 옵션) — my-70 browser-vm 자기 자신의 사용량, /usage 를 device_label
+  // 별로 묶어 기존 Drive/내부 스냅샷과 같은 모양(accounts[].points/resets/latest)으로 변환한다.
+  async function loadMy21ApiUsage() {
+    const api = CFG.my21api || {};
+    if (!api.url) throw new Error("my21api 연동이 아직 설정되지 않았습니다.");
+    const data = await fetchJson(api.url.replace(/\/$/, "") + "/usage?hours=10", { headers: { Authorization: "Bearer " + api.readToken } });
+    return toSnapshotShape(data.points || []);
+  }
+
+  function toSnapshotShape(points) {
+    const byLabel = {};
+    for (const p of points) (byLabel[p.device_label] ||= []).push(p);
+    const accounts = Object.keys(byLabel).sort().map((label) => {
+      const pts = byLabel[label].slice().sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+      const resets = [];
+      let prev = null;
+      for (const p of pts) {
+        if (prev) {
+          for (const [kind, key] of [["session", "session_pct"], ["weekly", "weekly_pct"]]) {
+            if (prev[key] != null && p[key] != null && p[key] < prev[key]) resets.push({ t: p.ts, kind });
+          }
+        }
+        prev = p;
+      }
+      const last = pts[pts.length - 1] || null;
+      return {
+        id: label, label,
+        points: pts.map((p) => ({ t: p.ts, session_pct: p.session_pct, weekly_pct: p.weekly_pct, credit_pct: p.credit_pct })),
+        resets,
+        latest: last ? { t: last.ts, session_pct: last.session_pct, weekly_pct: last.weekly_pct, credit_pct: last.credit_pct } : null,
+      };
+    });
+    return { generated_at: new Date().toISOString().slice(0, 19), window_hours: 10, step_min: 1, accounts };
+  }
+
+  async function fetchUsageSnapshot() {
+    if (INTERNAL) return fetchJson("api/claude_usage");
+    return (CFG.usageSource || "drive") === "my21api" ? loadMy21ApiUsage() : loadDriveJson();
+  }
+
   async function renderClaude() {
     const body = el("div", {}, el("div", { class: "note" }, "불러오는 중…"));
     $app.replaceChildren(topbar("📈 클로드 사용량", true), el("div", { class: "view" }, body));
     try {
-      const snap = INTERNAL ? await fetchJson("api/claude_usage") : await loadDriveJson();
+      const snap = await fetchUsageSnapshot();
       body.replaceChildren(el("div", { class: "note", style: "margin-bottom:10px" }, `최근 ${snap.window_hours}시간 · ${snap.step_min}분 간격 · 갱신 ${snap.generated_at.replace("T", " ")}`), ...snap.accounts.map(acctBlock));
     } catch (e) { body.replaceChildren(el("div", { class: "card state-err" }, "조회 실패: " + e.message)); }
   }
