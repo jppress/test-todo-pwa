@@ -145,6 +145,44 @@ if (typeof document !== "undefined") {
     load();
   }
 
+  // ----- 2번: 패드 화면 제어 -----
+  const PADCTL_ORDER = ["padview", "hlsview", "ytrelay"];
+
+  async function padctlAction(name, action, out, btns) {
+    btns.forEach((b) => (b.disabled = true)); out.textContent = "실행 중…";
+    try {
+      const r = await fetchJson("api/padctl/" + name + "/" + action, { method: "POST" });
+      out.textContent = r.ok ? (r.text || "완료") : "오류: " + (r.error || r.text || "실패");
+    } catch (e) { out.textContent = "오류: " + e.message; }
+    btns.forEach((b) => (b.disabled = false));
+  }
+
+  function padctlCard(name, meta) {
+    const out = el("pre", { class: "out" }, "(상태조회를 누르세요)");
+    const btns = [];
+    const mk = (label, action, cls) => { const b = el("button", { class: cls || "ghost", onclick: () => padctlAction(name, action, out, btns) }, label); btns.push(b); return b; };
+    const statusBtn = el("button", { class: "ghost", onclick: async () => {
+      statusBtn.disabled = true; out.textContent = "조회 중…";
+      try { const r = await fetchJson("api/padctl/status"); const s = r.status[name];
+        out.textContent = (s.running ? "가동 중" : "정지됨") + (s.text ? "\n" + s.text : ""); }
+      catch (e) { out.textContent = "오류: " + e.message; }
+      statusBtn.disabled = false;
+    } }, "상태조회");
+    btns.push(statusBtn);
+    return el("div", { class: "card" }, el("h2", {}, meta.label),
+      el("div", { class: "row" }, mk("시작", "start"), mk("종료", "stop", "danger"), statusBtn),
+      el("div", { class: "note" }, el("a", { href: meta.url, target: "_blank" }, meta.url)), out);
+  }
+
+  async function renderPadctl() {
+    const cards = el("div", {}, el("div", { class: "note" }, "불러오는 중…"));
+    $app.replaceChildren(topbar("📺 패드 화면 제어", true), el("div", { class: "view" }, cards));
+    try {
+      const r = await fetchJson("api/padctl/status");
+      cards.replaceChildren(...PADCTL_ORDER.map((name) => padctlCard(name, r.apps[name])));
+    } catch (e) { cards.replaceChildren(el("div", { class: "card state-err" }, "조회 실패: " + e.message)); }
+  }
+
   // ----- 11번: 클로드 사용량 -----
   const SERIES = [["session_pct", "현재 세션", "var(--s1)"], ["weekly_pct", "주간 한도", "var(--s2)"], ["credit_pct", "크레딧", "var(--s3)"]];
   const _WD = "일월화수목금토";
@@ -226,7 +264,8 @@ if (typeof document !== "undefined") {
 
   // 외부: Drive 공유 JSON (todo PWA 와 같은 GIS 토큰 방식). 미설정이면 안내만 표시.
   const DRIVE_TOKEN_KEY = "naeba.gtoken";
-  async function loadDriveJson() {
+  async function loadDriveJson(fileName, anyFolder) {
+    fileName = fileName || CFG.drive.fileName;
     const clientId = (CFG.drive || {}).clientId;
     if (!clientId) throw new Error("Drive 연동이 아직 설정되지 않았습니다(배포 승인 대기).");
     let tok = sessionStorage.getItem(DRIVE_TOKEN_KEY);
@@ -236,10 +275,10 @@ if (typeof document !== "undefined") {
       sessionStorage.setItem(DRIVE_TOKEN_KEY, tok);
     }
     const H = { headers: { Authorization: "Bearer " + tok } };
-    const inFolder = CFG.drive.folderId ? " and '" + CFG.drive.folderId + "' in parents" : "";
-    const q = encodeURIComponent("name='" + CFG.drive.fileName + "' and trashed=false" + inFolder);
+    const inFolder = CFG.drive.folderId && !anyFolder ? " and '" + CFG.drive.folderId + "' in parents" : "";
+    const q = encodeURIComponent("name='" + fileName + "' and trashed=false" + inFolder);
     const list = await fetchJson("https://www.googleapis.com/drive/v3/files?q=" + q + "&fields=files(id)&orderBy=modifiedTime desc&pageSize=1", H).catch((e) => { sessionStorage.removeItem(DRIVE_TOKEN_KEY); throw e; });
-    if (!list.files.length) throw new Error("Drive 에 사용량 파일이 없습니다.");
+    if (!list.files.length) throw new Error("Drive 에 " + fileName + " 파일이 없습니다.");
     return fetchJson("https://www.googleapis.com/drive/v3/files/" + list.files[0].id + "?alt=media", H);
   }
 
@@ -299,13 +338,120 @@ if (typeof document !== "undefined") {
     } catch (e) { body.replaceChildren(el("div", { class: "card state-err" }, "조회 실패: " + e.message)); }
   }
 
+
+  // ----- 17번: 아레나 AI -----
+  const ARENA_FILE = "naeba_arena.json";
+  const KIND_LABEL = { general: "일반", three: "Three.js" };
+  const STATUS_LABEL = { queued: "대기", running: "생성 중", done: "완료", error: "실패" };
+
+  function arenaFrame(html) {
+    // 샌드박스(allow-scripts 만, same-origin 없음) — 모델이 만든 코드가 내바 저장소·쿠키에 접근하지 못하게 한다.
+    return el("iframe", { class: "arena-frame", sandbox: "allow-scripts", srcdoc: html, loading: "lazy" });
+  }
+
+  function shotButton(job, side) {
+    // 서버가 그 쪽 HTML 을 헤드리스로 렌더해 텔레그램으로 사진 전송(내부 와이파이에서만).
+    const note = el("span", { class: "note" });
+    const btn = el("button", { class: "ghost", onclick: async () => {
+      btn.disabled = true; note.textContent = " 캡처 중…";
+      try {
+        const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 90000);  // 렌더+전송 10~20초
+        const r = await (await fetch("api/arena/" + job.id + "/shot", { method: "POST", headers: { "Content-Type": "application/json", "X-Naeba-Confirm": "1" }, body: JSON.stringify({ side }), signal: ctl.signal })).json();
+        clearTimeout(t);
+        note.textContent = r.sent ? " 전송했습니다" : " 실패: " + (r.error || "");
+      } catch (e) { note.textContent = " 실패: " + e.message; }
+      btn.disabled = false;
+    } }, "📷 캡처 전송");
+    return el("div", { class: "row", style: "margin:6px 0" }, btn, note);
+  }
+
+  function arenaDetail(job) {
+    const box = el("div", { class: "card" });
+    const isThree = job.kind === "three";
+    const sides = ["a", "b"].filter((k) => job["text_" + k]);
+    let cur = job.chosen || "a";
+    const body = el("div", {});
+    const tabs = el("div", { class: "row", style: "margin:0 0 8px" });
+    function draw() {
+      tabs.replaceChildren(...sides.map((k) => el("button", { class: k === cur ? "" : "ghost", onclick: () => { cur = k; draw(); } },
+        k.toUpperCase() + (k === job.chosen ? " ✓선택" : ""))));
+      const html = job["html_" + cur], text = job["text_" + cur], model = job["model_" + cur];
+      const kids = [el("div", { class: "note" }, "모델: ", el("b", {}, model || "?"), k_of(cur) )];
+      if (isThree) {
+        kids.push(html ? arenaFrame(html) : el("div", { class: "note state-err" }, "실행 가능한 코드를 찾지 못했습니다."));
+        if (html && INTERNAL) kids.push(shotButton(job, cur));
+        if (html) kids.push(el("details", {}, el("summary", {}, "코드 보기"), el("pre", { class: "out" }, html)));
+        kids.push(el("details", {}, el("summary", {}, "답변 원문"), el("pre", { class: "out" }, text)));
+      } else kids.push(el("pre", { class: "out arena-text" }, text));
+      body.replaceChildren(...kids);
+    }
+    function k_of(k) { return k === job.chosen ? " (무작위 선택)" : ""; }
+    box.append(el("h2", {}, (KIND_LABEL[job.kind] || job.kind) + " · " + job.input),
+      el("div", { class: "note" }, "선택: " + (job.vote || "?") + " → ", el("b", {}, job.best_model || "?"), " · " + (job.finished || "").replace("T", " ").slice(0, 16)),
+      tabs, body);
+    draw();
+    return box;
+  }
+
+  async function renderArena(openId) {
+    const detail = el("div", {});
+    const list = el("div", {}, el("div", { class: "note" }, "불러오는 중…"));
+    const status = el("div", { class: "note" });
+    let jobs = [], timer = null;
+
+    async function loadList() {
+      try {
+        if (INTERNAL) jobs = (await fetchJson("api/arena/list")).jobs;
+        else jobs = (await loadDriveJson(ARENA_FILE, true)).jobs.map((j) => ({ ...j, _full: true }));
+      } catch (e) { list.replaceChildren(el("div", { class: "card state-err" }, "조회 실패: " + e.message)); return false; }
+      list.replaceChildren(...(jobs.length ? jobs.map(item) : [el("div", { class: "note" }, "이력이 없습니다.")]));
+      const busy = jobs.some((j) => j.status === "queued" || j.status === "running");
+      status.textContent = busy ? "⏳ 생성 중… (Three.js 는 수 분~30분 이상 걸릴 수 있습니다, 자동 갱신)" : "";
+      return busy;
+    }
+    function item(j) {
+      const cls = j.status === "error" ? "state-err" : j.status === "done" ? "" : "state-off";
+      return el("button", { class: "menu-item arena-item", onclick: () => show(j) },
+        el("span", { class: "txt" }, (j.kind === "three" ? "🧊 " : "💬 ") + j.input),
+        el("span", { class: "note " + cls }, (STATUS_LABEL[j.status] || j.status) + (j.best_model ? " · " + j.best_model : "") + " · " + (j.created || "").replace("T", " ").slice(5, 16)));
+    }
+    async function show(j) {
+      if (j.status === "error") { detail.replaceChildren(el("div", { class: "card state-err" }, "실패: " + (j.error || ""))); return; }
+      if (j.status !== "done") { detail.replaceChildren(el("div", { class: "note" }, "아직 생성 중입니다.")); return; }
+      try { const full = j._full ? j : await fetchJson("api/arena/" + j.id); detail.replaceChildren(arenaDetail(full)); detail.scrollIntoView({ behavior: "smooth" }); }
+      catch (e) { detail.replaceChildren(el("div", { class: "card state-err" }, "조회 실패: " + e.message)); }
+    }
+    async function tick() {
+      const busy = await loadList();
+      clearTimeout(timer);
+      if (busy && location.hash.startsWith("#/17")) timer = setTimeout(tick, 5000);
+    }
+    async function ask(kind) {
+      const text = input.value.trim(); if (!text) { status.textContent = "내용을 입력하세요."; return; }
+      btns.forEach((b) => (b.disabled = true));
+      try {
+        const r = await fetchJson("api/arena/ask", { method: "POST", headers: { "Content-Type": "application/json", "X-Naeba-Confirm": "1" }, body: JSON.stringify({ kind, text }) });
+        if (!r.ok) throw new Error(r.error);
+        input.value = ""; tick();
+      } catch (e) { status.textContent = "오류: " + e.message; }
+      btns.forEach((b) => (b.disabled = false));
+    }
+    const input = el("input", { class: "arena-input", type: "text", maxlength: "200", placeholder: "질문 또는 만들 물체(예: 사과)" });
+    const btns = [el("button", { onclick: () => ask("general") }, "질문"), el("button", { onclick: () => ask("three") }, "three.js 만들기")];
+    const form = INTERNAL ? el("div", { class: "card" }, input, el("div", { class: "row" }, ...btns),
+      el("div", { class: "note" }, "질문=입력 그대로 / three.js 만들기=“Three.js로 ○○ 만들어줘”로 바꿔 질문. Arena 두 답 중 하나를 무작위로 골라 모델명을 확인합니다.")) : el("div", { class: "note" }, "외부에서는 이력·결과 조회만 가능합니다(질문은 내부 와이파이에서).");
+    $app.replaceChildren(topbar("🏟️ 아레나 AI", true), el("div", { class: "view" }, form, status, detail, el("h2", {}, "이력"), list));
+    await tick();
+    if (openId) { const j = jobs.find((x) => x.id === openId); if (j) show(j); }
+  }
+
   // ----- 라우팅 -----
   function route() {
     const no = parseInt((location.hash.match(/^#\/(\d+)/) || [])[1], 10);
     const m = MENUS.menus.find((x) => x.no === no);
     if (!m) return renderHome();
     if (isInternalNo(no, MENUS.internalMax) && !INTERNAL) return renderHome();
-    return m.view === "laptop" ? renderLaptop() : m.view === "claude" ? renderClaude() : renderHome();
+    return m.view === "laptop" ? renderLaptop() : m.view === "padctl" ? renderPadctl() : m.view === "claude" ? renderClaude() : m.view === "arena" ? renderArena() : renderHome();
   }
 
   fetchJson("menus.json").then((m) => { MENUS = m; window.addEventListener("hashchange", route); route(); })
