@@ -264,8 +264,7 @@ if (typeof document !== "undefined") {
 
   // 외부: Drive 공유 JSON (todo PWA 와 같은 GIS 토큰 방식). 미설정이면 안내만 표시.
   const DRIVE_TOKEN_KEY = "naeba.gtoken";
-  async function loadDriveJson(fileName, anyFolder) {
-    fileName = fileName || CFG.drive.fileName;
+  async function driveToken() {
     const clientId = (CFG.drive || {}).clientId;
     if (!clientId) throw new Error("Drive 연동이 아직 설정되지 않았습니다(배포 승인 대기).");
     let tok = sessionStorage.getItem(DRIVE_TOKEN_KEY);
@@ -274,6 +273,29 @@ if (typeof document !== "undefined") {
       tok = await new Promise((res, rej) => window.google.accounts.oauth2.initTokenClient({ client_id: clientId, scope: "https://www.googleapis.com/auth/drive", callback: (r) => (r.access_token ? res(r.access_token) : rej(new Error("로그인 취소/실패"))) }).requestAccessToken({ prompt: "" }));
       sessionStorage.setItem(DRIVE_TOKEN_KEY, tok);
     }
+    return tok;
+  }
+
+  // 외부 질문 등록: 폴더 소유자 Drive 폴더에 요청 파일 1개를 만든다(todo PWA 와 같은 폴더·토큰). macmini publisher 가 수집해 내바 서버에 접수한다.
+  async function postArenaRequest(kind, text) {
+    const tok = await driveToken();
+    const folder = (CFG.drive || {}).folderId;
+    if (!folder) throw new Error("Drive 폴더 설정이 없습니다.");
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const meta = { name: "naeba_arena_req_" + id + ".json", parents: [folder], mimeType: "application/json" };
+    const body = JSON.stringify({ id, kind, text, ts: new Date().toISOString() });
+    const boundary = "naebaarena" + id;
+    const payload = "--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" + JSON.stringify(meta) + "\r\n--" + boundary + "\r\nContent-Type: application/json\r\n\r\n" + body + "\r\n--" + boundary + "--";
+    const r = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id", { method: "POST", headers: { Authorization: "Bearer " + tok, "Content-Type": "multipart/related; boundary=" + boundary }, body: payload });
+    if (!r.ok) { if (r.status === 401) sessionStorage.removeItem(DRIVE_TOKEN_KEY); throw new Error("등록 실패 HTTP " + r.status); }
+    return id;
+  }
+
+  async function loadDriveJson(fileName, anyFolder) {
+    fileName = fileName || CFG.drive.fileName;
+    const clientId = (CFG.drive || {}).clientId;
+    if (!clientId) throw new Error("Drive 연동이 아직 설정되지 않았습니다(배포 승인 대기).");
+    const tok = await driveToken();
     const H = { headers: { Authorization: "Bearer " + tok } };
     const inFolder = CFG.drive.folderId && !anyFolder ? " and '" + CFG.drive.folderId + "' in parents" : "";
     const q = encodeURIComponent("name='" + fileName + "' and trashed=false" + inFolder);
@@ -441,16 +463,22 @@ if (typeof document !== "undefined") {
       const text = input.value.trim(); if (!text) { status.textContent = "내용을 입력하세요."; return; }
       btns.forEach((b) => (b.disabled = true));
       try {
-        const r = await fetchJson("api/arena/ask", { method: "POST", headers: { "Content-Type": "application/json", "X-Naeba-Confirm": "1" }, body: JSON.stringify({ kind, text }) });
-        if (!r.ok) throw new Error(r.error);
-        input.value = ""; tick();
+        if (INTERNAL) {
+          const r = await fetchJson("api/arena/ask", { method: "POST", headers: { "Content-Type": "application/json", "X-Naeba-Confirm": "1" }, body: JSON.stringify({ kind, text }) });
+          if (!r.ok) throw new Error(r.error);
+          input.value = ""; tick();
+        } else {
+          await postArenaRequest(kind, text);
+          input.value = "";
+          status.textContent = "✅ 등록됨 — 노트북이 켜져 있으면 2분 안에 접수되고, 생성(수 분~30분+) 후 이력에 나타납니다. 이력은 새로고침하면 갱신됩니다.";
+        }
       } catch (e) { status.textContent = "오류: " + e.message; }
       btns.forEach((b) => (b.disabled = false));
     }
     const input = el("input", { class: "arena-input", type: "text", maxlength: "200", placeholder: "질문 또는 만들 물체(예: 사과)" });
     const btns = [el("button", { onclick: () => ask("general") }, "질문"), el("button", { onclick: () => ask("three") }, "three.js 만들기")];
-    const form = INTERNAL ? el("div", { class: "card" }, input, el("div", { class: "row" }, ...btns),
-      el("div", { class: "note" }, "질문=입력 그대로 / three.js 만들기=“Three.js로 ○○ 만들어줘”로 바꿔 질문. Arena 두 답 중 하나를 무작위로 골라 모델명을 확인합니다.")) : el("div", { class: "note" }, "외부에서는 이력·결과 조회만 가능합니다(질문은 내부 와이파이에서).");
+    const form = el("div", { class: "card" }, input, el("div", { class: "row" }, ...btns),
+      el("div", { class: "note" }, "질문=입력 그대로 / three.js 만들기=“Three.js로 ○○ 만들어줘”로 바꿔 질문. Arena 두 답 중 하나를 무작위로 골라 모델명을 확인합니다." + (INTERNAL ? "" : " (외부: 구글 로그인 후 등록, 부팅된 노트북 my-80/my-85 가 처리)")));
     $app.replaceChildren(topbar("🏟️ 아레나 AI", true), el("div", { class: "view" }, form, status, detail, el("h2", {}, "이력"), list));
     await tick();
     if (openId) { const j = jobs.find((x) => x.id === openId); if (j) show(j); }
