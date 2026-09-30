@@ -397,13 +397,24 @@ if (typeof document !== "undefined") {
     const detail = el("div", {});
     const list = el("div", {}, el("div", { class: "note" }, "불러오는 중…"));
     const status = el("div", { class: "note" });
-    let jobs = [], timer = null;
+    let jobs = [], timer = null, userClicked = false;
 
     async function loadList() {
       try {
         if (INTERNAL) jobs = (await fetchJson("api/arena/list")).jobs;
-        else jobs = (await loadDriveJson(ARENA_FILE, true)).jobs.map((j) => ({ ...j, _full: true }));
-      } catch (e) { list.replaceChildren(el("div", { class: "card state-err" }, "조회 실패: " + e.message)); return false; }
+        else {
+          // 외부: 구글 로그인 팝업은 사용자 클릭 없이는 브라우저가 막으므로, 토큰이 없으면 버튼을 먼저 보여준다.
+          if (!sessionStorage.getItem(DRIVE_TOKEN_KEY) && !userClicked) {
+            list.replaceChildren(el("button", { onclick: () => { userClicked = true; tick(); } }, "구글 로그인하고 이력 보기"));
+            return false;
+          }
+          jobs = (await loadDriveJson(ARENA_FILE, true)).jobs.map((j) => ({ ...j, _full: true }));
+        }
+      } catch (e) {
+        userClicked = false;
+        list.replaceChildren(el("div", { class: "card state-err" }, "조회 실패: " + e.message), el("button", { onclick: () => { userClicked = true; tick(); } }, "다시 로그인"));
+        return false;
+      }
       list.replaceChildren(...(jobs.length ? jobs.map(item) : [el("div", { class: "note" }, "이력이 없습니다.")]));
       const busy = jobs.some((j) => j.status === "queued" || j.status === "running");
       status.textContent = busy ? "⏳ 생성 중… (Three.js 는 수 분~30분 이상 걸릴 수 있습니다, 자동 갱신)" : "";
