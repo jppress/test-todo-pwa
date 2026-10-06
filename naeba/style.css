@@ -64,3 +64,4 @@ details summary{margin:8px 0;cursor:pointer}
 .imgcard .cap{font-size:12px;margin-top:6px;line-height:1.35;max-height:3.9em;overflow:hidden;word-break:break-word}
 .chk{display:inline-flex;align-items:center;gap:6px;font-size:14px;margin-right:10px}.chk input{width:18px;height:18px}
 textarea.arena-input{font:inherit;resize:vertical}
+.modellist{display:flex;flex-direction:column;gap:6px;margin:8px 0 2px 4px;padding:8px;border:1px solid var(--line);border-radius:8px}

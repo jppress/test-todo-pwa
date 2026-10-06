@@ -22,6 +22,11 @@ function fmtPct(v) { return v === null || v === undefined ? "–" : Math.round(v
 
 // 21번: 한 줄 1프롬프트 → 목록(빈 줄·중복 제거, 최대 30). 12번: 서울 벽시계 ts 기준 최근 N분 행.
 const IMG_MAX_PROMPTS = 30, IMG_MAX_LEN = 600;
+// 서버(imgq.py PRESET_SIZES)와 같은 목록. 1080 은 서버가 16배수(1088)로 생성 후 요청 크기로 크롭한다.
+const IMG_SIZES = [[1024, 1024, "1024×1024 정사각"], [768, 768, "768×768 정사각"], [1920, 1080, "1920×1080 가로 FHD"], [1080, 720, "1080×720 가로 3:2"],
+  [1280, 720, "1280×720 가로 HD"], [720, 1280, "720×1280 세로"], [720, 480, "720×480 가로"], [480, 720, "480×720 세로"]];
+// 모델 선택 규칙: 선택 체크 시 체크된 id 들(콤마), 아니면 라디오(기본="" / 전체="all")
+function modelSpec(selectMode, radio, checkedIds) { return selectMode ? checkedIds.join(",") : radio === "all" ? "all" : ""; }
 function parsePrompts(text) {
   const seen = new Set(), out = [];
   for (const l of String(text || "").split(/\r?\n/)) { const t = l.trim(); if (t && !seen.has(t)) { seen.add(t); out.push(t); } }
@@ -34,7 +39,7 @@ function recentRows(points, minutes, nowTs) {
 function fmtEta(sec) { if (!sec || sec < 60) return sec ? "1분 미만" : "–"; const m = Math.round(sec / 60); return m >= 60 ? Math.floor(m / 60) + "시간 " + (m % 60) + "분" : m + "분"; }
 function metricNum(v, d = 0) { return v === null || v === undefined ? "–" : Number(v).toFixed(d); }
 
-if (typeof module !== "undefined") module.exports = { slotsOfPage, isInternalNo, clampPage, pageCount, pctClass, chartX, fmtPct, parsePrompts, recentRows, fmtEta, metricNum };
+if (typeof module !== "undefined") module.exports = { slotsOfPage, isInternalNo, clampPage, pageCount, pctClass, chartX, fmtPct, parsePrompts, recentRows, fmtEta, metricNum, IMG_SIZES, modelSpec };
 
 // ---------- 화면 ----------
 if (typeof document !== "undefined") {
@@ -586,13 +591,13 @@ if (typeof document !== "undefined") {
 
   async function renderImggen() {
     const post = (url, body) => fetchJson(url, { method: "POST", headers: { "Content-Type": "application/json", "X-Naeba-Confirm": "1" }, body: JSON.stringify(body) });
-    let models = [], snap = null, jobs = [], total = 0, timer = null, userClicked = false, offset = 0;
+    let models = [], defaultModel = "", snap = null, jobs = [], total = 0, timer = null, userClicked = false, offset = 0;
     const PAGE = 24;
     const msg = el("div", { class: "note" });
     const area = el("textarea", { class: "arena-input", rows: "5", placeholder: "한 줄에 프롬프트 1개 (최대 30개, 영어 권장)\n예) a red apple on a wooden table, studio light" });
     const count = el("div", { class: "note" });
-    const modelBox = el("div", { class: "row", style: "margin:6px 0" });
-    const sizeSel = el("select", { class: "arena-input", style: "width:auto" }, [768, 1024].map((v) => el("option", { value: v, selected: v === 1024 }, v + "×" + v)));
+    const modelBox = el("div", { style: "margin:6px 0" });
+    const sizeSel = el("select", { class: "arena-input", style: "width:auto" }, IMG_SIZES.map(([w, h, label], i) => el("option", { value: w + "x" + h, selected: i === 0 }, label)));
     const progress = el("div", { class: "card" }, el("div", { class: "note" }, "진행 상태 불러오는 중…"));
     const histBox = el("div", { class: "imggrid" });
     const moreBtn = el("button", { class: "ghost", style: "display:none", onclick: () => { offset += PAGE; loadHist(true); } }, "더 보기");
@@ -601,25 +606,39 @@ if (typeof document !== "undefined") {
     const st = el("select", { class: "arena-input", style: "flex:1;min-width:90px;margin:0", onchange: () => { offset = 0; loadHist(); } },
       el("option", { value: "" }, "전체 상태"), Object.entries(IMG_STATUS).map(([k, v]) => el("option", { value: k }, v)));
     const checks = () => [...modelBox.querySelectorAll("input[data-m]")];
+    let modelSig = "";
     function drawModels() {
-      const usable = models.filter((m) => m.usable);
-      const all = el("input", { type: "checkbox", onchange: (e) => checks().forEach((c) => (c.checked = e.target.checked)) });
-      modelBox.replaceChildren(el("label", { class: "chk" }, all, "전체 선택(" + usable.length + ")"),
-        ...models.map((m) => el("label", { class: "chk" + (m.usable ? "" : " state-off") }, el("input", { type: "checkbox", "data-m": m.id, disabled: !m.usable, checked: m.usable && m.id === (models.find((x) => x.usable) || {}).id }), m.label + (m.usable ? "" : " (사용 불가)"))));
+      // 기본(기본 모델 1개) / 전체(사용 가능 전부) / '선택 모델' 체크 시 설치된 모델 목록에서 다중 선택
+      const usable = models.filter((m) => m.usable), def = models.find((m) => m.id === defaultModel) || usable[0];
+      const keep = new Set(checks().filter((c) => c.checked).map((c) => c.dataset.m));
+      const list = el("div", { class: "modellist", style: "display:none" }, models.map((m) => el("label", { class: "chk" + (m.usable ? "" : " state-off") },
+        el("input", { type: "checkbox", "data-m": m.id, disabled: !m.usable, checked: keep.has(m.id) }), m.label + (m.usable ? "" : m.installed ? " (설치됨·기본 제외, 선택 불가)" : " (미설치)"))));
+      const sel = el("input", { type: "checkbox", id: "selmode", onchange: (e) => { list.style.display = e.target.checked ? "" : "none"; modelBox.querySelectorAll("input[name=mm]").forEach((r) => (r.disabled = e.target.checked)); } });
+      modelBox.replaceChildren(
+        el("div", { class: "row", style: "margin:0;align-items:center" },
+          el("label", { class: "chk" }, el("input", { type: "radio", name: "mm", value: "", checked: true }), "기본" + (def ? "(" + def.label.split(" (")[0] + ")" : "")),
+          el("label", { class: "chk" }, el("input", { type: "radio", name: "mm", value: "all" }), "전체(" + usable.length + ")"),
+          el("label", { class: "chk" }, sel, "선택 모델")), list);
+    }
+    function currentSpec() {
+      const selMode = !!(modelBox.querySelector("#selmode") || {}).checked;
+      const radio = (modelBox.querySelector("input[name=mm]:checked") || {}).value || "";
+      return modelSpec(selMode, radio, checks().filter((c) => c.checked).map((c) => c.dataset.m));
     }
     function upd() { const r = parsePrompts(area.value); count.textContent = r.prompts.length + "개 인식" + (r.truncated ? " — 30개 초과분은 제외됩니다" : "") + (r.tooLong ? " — 600자 넘는 줄이 있습니다" : ""); }
     area.addEventListener("input", upd); upd();
 
     async function submit() {
-      const r = parsePrompts(area.value); const sel = checks().filter((c) => c.checked).map((c) => c.dataset.m);
+      const r = parsePrompts(area.value); const spec = currentSpec();
+      const selMode = !!(modelBox.querySelector("#selmode") || {}).checked;
       if (!r.prompts.length) { msg.textContent = "프롬프트를 입력하세요."; return; }
       if (r.tooLong) { msg.textContent = "600자 넘는 줄이 있습니다."; return; }
-      if (!sel.length) { msg.textContent = "모델을 하나 이상 선택하세요."; return; }
-      const spec = sel.length === models.filter((m) => m.usable).length && sel.length > 1 ? "all" : sel.join(","), w = parseInt(sizeSel.value, 10);
+      if (selMode && !spec) { msg.textContent = "선택 모델을 하나 이상 체크하세요."; return; }
+      const [w, h] = sizeSel.value.split("x").map((v) => parseInt(v, 10));
       sub.disabled = true;
       try {
-        if (INTERNAL) { const res = await post("api/imggen/submit", { prompts: r.prompts, models: spec, w, h: w }); if (!res.ok) throw new Error(res.error); msg.textContent = `✅ ${res.job_ids.length}건 예약됨 (프롬프트 ${res.prompts} × 모델 ${res.models.length}) — my-50 부하를 보며 순차 생성합니다.`; tick(); }
-        else { await postImgRequest(r.prompts, spec, w, w); msg.textContent = "✅ 요청 등록됨 — 집 와이파이 쪽 내바가 2분 안에 접수해 순차 생성합니다. 진행 상태는 몇 분 간격으로 갱신됩니다."; }
+        if (INTERNAL) { const res = await post("api/imggen/submit", { prompts: r.prompts, models: spec, w, h }); if (!res.ok) throw new Error(res.error); msg.textContent = `✅ ${res.job_ids.length}건 예약됨 (프롬프트 ${res.prompts} × 모델 ${res.models.length}, ${w}×${h}) — my-50 부하를 보며 순차 생성합니다.`; tick(); }
+        else { await postImgRequest(r.prompts, spec, w, h); msg.textContent = "✅ 요청 등록됨 — 집 와이파이 쪽 내바가 2분 안에 접수해 순차 생성합니다. 진행 상태는 몇 분 간격으로 갱신됩니다."; }
         area.value = ""; upd();
       } catch (e) { msg.textContent = "오류: " + e.message; }
       sub.disabled = false;
@@ -631,6 +650,7 @@ if (typeof document !== "undefined") {
         const s = await fetchJson("api/imggen/status"); if (s.ok === false) throw new Error(s.error); return s;
       }
       snap = await loadDriveJson(IMG_SNAP, true);
+      if (snap.models && JSON.stringify(snap.models) !== modelSig) { modelSig = JSON.stringify(snap.models); models = snap.models; defaultModel = snap.default_model || ""; drawModels(); }
       return { overall_pct: snap.overall_pct, eta_sec: snap.eta_sec, counts: snap.counts, paused: snap.paused, worker: snap.worker, running: (snap.jobs.find((j) => j.status === "running") || null), snapAt: snap.generated_at };
     }
     function drawProgress(s) {
@@ -695,8 +715,8 @@ if (typeof document !== "undefined") {
       el("div", { class: "row", style: "align-items:center" }, sizeSel, sub), msg,
       el("div", { class: "note" }, "예약된 작업은 my-50 이 온도·메모리·부하를 보면서 한 장씩 천천히 만듭니다(과열 시 자동 대기). 빠르게 만드는 것보다 my-50 보호가 우선입니다."));
     $app.replaceChildren(topbar("🎨 이미지 생성", true), el("div", { class: "view" }, form, progress, el("h2", {}, "이력"), el("div", { class: "row", style: "margin:0 0 10px" }, q, dt, st), histBox, el("div", { class: "row" }, moreBtn)));
-    if (INTERNAL) { try { const m = await fetchJson("api/imggen/models"); if (m.ok === false) throw new Error(m.error); models = m.models; } catch (e) { msg.textContent = "모델 목록 실패: " + e.message; } }
-    else models = [{ id: "all", label: "서버 기본 모델", usable: true }];
+    if (INTERNAL) { try { const m = await fetchJson("api/imggen/models"); if (m.ok === false) throw new Error(m.error); models = m.models; defaultModel = m.default || ""; } catch (e) { msg.textContent = "모델 목록 실패: " + e.message; } }
+    else models = [{ id: "", label: "서버 기본 모델", usable: true, installed: true }];   // 로그인 후 스냅샷의 실제 목록으로 교체
     drawModels();
     await tick();
   }
