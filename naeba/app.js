@@ -20,7 +20,21 @@ function pageCount(menus) {
 }
 function fmtPct(v) { return v === null || v === undefined ? "–" : Math.round(v) + "%"; }
 
-if (typeof module !== "undefined") module.exports = { slotsOfPage, isInternalNo, clampPage, pageCount, pctClass, chartX, fmtPct };
+// 21번: 한 줄 1프롬프트 → 목록(빈 줄·중복 제거, 최대 30). 12번: 서울 벽시계 ts 기준 최근 N분 행.
+const IMG_MAX_PROMPTS = 30, IMG_MAX_LEN = 600;
+function parsePrompts(text) {
+  const seen = new Set(), out = [];
+  for (const l of String(text || "").split(/\r?\n/)) { const t = l.trim(); if (t && !seen.has(t)) { seen.add(t); out.push(t); } }
+  return { prompts: out.slice(0, IMG_MAX_PROMPTS), truncated: out.length > IMG_MAX_PROMPTS, tooLong: out.some((p) => p.length > IMG_MAX_LEN) };
+}
+function recentRows(points, minutes, nowTs) {
+  const cut = new Date(new Date(nowTs + "Z").getTime() - minutes * 60000).toISOString().slice(0, 19);
+  return points.filter((p) => p.ts >= cut && p.ts <= nowTs).slice().reverse();
+}
+function fmtEta(sec) { if (!sec || sec < 60) return sec ? "1분 미만" : "–"; const m = Math.round(sec / 60); return m >= 60 ? Math.floor(m / 60) + "시간 " + (m % 60) + "분" : m + "분"; }
+function metricNum(v, d = 0) { return v === null || v === undefined ? "–" : Number(v).toFixed(d); }
+
+if (typeof module !== "undefined") module.exports = { slotsOfPage, isInternalNo, clampPage, pageCount, pctClass, chartX, fmtPct, parsePrompts, recentRows, fmtEta, metricNum };
 
 // ---------- 화면 ----------
 if (typeof document !== "undefined") {
@@ -484,13 +498,216 @@ if (typeof document !== "undefined") {
     if (openId) { const j = jobs.find((x) => x.id === openId); if (j) show(j); }
   }
 
+
+  // ----- 공용 선 차트(12번): 시리즈 N개, 값 null 은 끊김 -----
+  function lineChart(title, pts, series, { min = 0, max = null, unit = "" } = {}) {
+    const W = 640, H = 170, padL = 34, padB = 20, padT = 8, pw = W - padL - 6, ph = H - padT - padB;
+    const vals = pts.flatMap((p) => series.map((s) => p[s.key])).filter((v) => v !== null && v !== undefined);
+    const hi = max !== null ? max : Math.max(1, Math.ceil(Math.max(...(vals.length ? vals : [1])) * 1.1));
+    const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": title });
+    for (const g of [0, 0.5, 1]) { const y = padT + ph * (1 - g), v = min + (hi - min) * g; s.append(svg("line", { class: "grid", x1: padL, x2: W - 6, y1: y, y2: y })); const t = svg("text", { x: 2, y: y + 3 }); t.textContent = Math.round(v); s.append(t); }
+    if (pts.length < 2) { const t = svg("text", { x: W / 2, y: H / 2, "text-anchor": "middle" }); t.textContent = "데이터 수집 중"; s.append(t); return s; }
+    const X = (i) => padL + chartX(i, pts.length, pw), Y = (v) => padT + ph * (1 - (Math.min(hi, Math.max(min, v)) - min) / (hi - min || 1));
+    for (const sr of series) {
+      let d = "", pen = false;
+      pts.forEach((p, i) => { const v = p[sr.key]; if (v === null || v === undefined) { pen = false; return; } d += (pen ? "L" : "M") + X(i).toFixed(1) + " " + Y(v).toFixed(1); pen = true; });
+      if (d) s.append(svg("path", { d, fill: "none", stroke: sr.color, "stroke-width": 1.6 }));
+    }
+    for (const i of [0, Math.floor(pts.length / 2), pts.length - 1]) { const t = svg("text", { class: "axis-t", x: X(i), y: H - 5, "text-anchor": i === 0 ? "start" : i === pts.length - 1 ? "end" : "middle" }); t.textContent = pts[i].ts.slice(5, 16).replace("T", " "); s.append(t); }
+    return el("div", { class: "card" }, el("h2", {}, title, el("span", { class: "note", style: "margin:0 0 0 auto" }, unit)), s,
+      el("div", { class: "legend" }, series.map((x) => el("span", {}, el("i", { style: "background:" + x.color }), x.name))));
+  }
+
+  // ----- 12번: my-50 사용량 (기존 클로드 사용량 패턴 — 24시간 분단위 그래프 + 최근 30분 표) -----
+  async function loadMy50() {
+    if (INTERNAL) { const r = await fetchJson("api/my50/usage?hours=24"); if (r.ok === false) throw new Error(r.error); return r.points || []; }
+    const api = CFG.my21api || {};
+    if (!api.url) throw new Error("my21api 연동이 아직 설정되지 않았습니다.");
+    return (await fetchJson(api.url.replace(/\/$/, "") + "/l2?hours=24", { headers: { Authorization: "Bearer " + api.readToken } })).points || [];
+  }
+
+  async function renderMy50() {
+    const body = el("div", {}, el("div", { class: "note" }, "불러오는 중…"));
+    $app.replaceChildren(topbar("🖥️ my-50 사용량", true), el("div", { class: "view" }, body));
+    let timer = null;
+    async function load() {
+      try {
+        const pts = await loadMy50();
+        const last = pts[pts.length - 1];
+        if (!last) { body.replaceChildren(el("div", { class: "card state-off" }, "아직 수집된 데이터가 없습니다(샘플러 기동 후 1~5분 뒤 표시).")); return; }
+        const tile = (l, v, sub, color) => el("div", { class: "tile" }, el("div", { class: "l" }, el("i", { class: "d", style: "background:" + color }), l), el("div", { class: "n" }, v), el("div", { class: "s" }, sub || ""));
+        const hot = last.temp !== null && last.temp >= 80;
+        const tiles = el("div", { class: "tiles" },
+          tile("CPU", metricNum(last.cpu) + "%", "", "var(--s1)"), tile("GPU", metricNum(last.gpu) + "%", "", "var(--s2)"),
+          tile("온도", metricNum(last.temp) + "℃", hot ? "⚠ 과열 구간" : "", "var(--s3)"),
+          tile("내장 여유", metricNum(last.disk_in) + "GB", "", "var(--s1)"), tile("외장 여유", metricNum(last.disk_ex) + "GB", "", "var(--s2)"));
+        const C = ["var(--s1)", "var(--s2)", "var(--s3)"];
+        const rows = recentRows(pts, 30, last.ts);
+        const th = ["시각", "CPU%", "GPU%", "온도℃", "메모리여유%", "내장GB", "외장GB", "생성큐"];
+        const table = el("table", { class: "tbl" }, el("thead", {}, el("tr", {}, th.map((h) => el("th", {}, h)))),
+          el("tbody", {}, rows.map((p) => el("tr", {}, [p.ts.slice(11, 16), metricNum(p.cpu), metricNum(p.gpu), metricNum(p.temp, 1), metricNum(p.mem_free), metricNum(p.disk_in, 1), metricNum(p.disk_ex, 1),
+            (p.q_run || 0) + "/" + (p.q_wait || 0)].map((v) => el("td", {}, v))))));
+        body.replaceChildren(el("div", { class: "gen-at" }, `최근 샘플 ${last.ts.replace("T", " ").slice(0, 16)} · 최근 24시간 ${pts.length}건`), tiles,
+          lineChart("CPU · GPU 사용률", pts, [{ key: "cpu", name: "CPU", color: C[0] }, { key: "gpu", name: "GPU", color: C[1] }], { max: 100, unit: "%" }),
+          lineChart("온도 (SoC 최고)", pts, [{ key: "temp", name: "온도", color: C[2] }], { min: 20, max: 100, unit: "℃ · 80↑ 대기 중단, 88↑ 강제정지" }),
+          lineChart("디스크 여유", pts, [{ key: "disk_in", name: "내장", color: C[0] }, { key: "disk_ex", name: "외장", color: C[1] }], { unit: "GB" }),
+          el("div", { class: "card" }, el("h2", {}, "최근 30분 데이터 (1분 단위)"), el("div", { class: "tblwrap" }, table), el("div", { class: "note" }, "큐 = 실행 중/대기 중 이미지 작업 수")));
+      } catch (e) { body.replaceChildren(el("div", { class: "card state-err" }, "조회 실패: " + e.message)); }
+      clearTimeout(timer);
+      if (location.hash.startsWith("#/12")) timer = setTimeout(load, 60000);
+    }
+    await load();
+  }
+
+  // ----- 21번: 이미지 생성 (my-50 큐 · 부하 자동 조절 · 이력) -----
+  const IMG_SNAP = "naeba_imggen.json";
+  const IMG_STATUS = { queued: "대기", running: "생성 중", done: "완료", error: "실패", canceled: "취소" };
+  const driveBlobCache = new Map();
+
+  async function driveBlobUrl(fileId) {
+    if (driveBlobCache.has(fileId)) return driveBlobCache.get(fileId);
+    const tok = await driveToken();
+    const r = await fetch("https://www.googleapis.com/drive/v3/files/" + fileId + "?alt=media", { headers: { Authorization: "Bearer " + tok } });
+    if (!r.ok) { if (r.status === 401) sessionStorage.removeItem(DRIVE_TOKEN_KEY); throw new Error("이미지 HTTP " + r.status); }
+    const url = URL.createObjectURL(await r.blob()); driveBlobCache.set(fileId, url); return url;
+  }
+
+  async function postImgRequest(prompts, models, w, h) {
+    const tok = await driveToken(); const folder = (CFG.drive || {}).folderId;
+    if (!folder) throw new Error("Drive 폴더 설정이 없습니다.");
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const meta = { name: "naeba_img_req_" + id + ".json", parents: [folder], mimeType: "application/json" };
+    const boundary = "naebaimg" + id;
+    const payload = "--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" + JSON.stringify(meta) + "\r\n--" + boundary + "\r\nContent-Type: application/json\r\n\r\n" + JSON.stringify({ id, prompts, models, w, h, ts: new Date().toISOString() }) + "\r\n--" + boundary + "--";
+    const r = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id", { method: "POST", headers: { Authorization: "Bearer " + tok, "Content-Type": "multipart/related; boundary=" + boundary }, body: payload });
+    if (!r.ok) { if (r.status === 401) sessionStorage.removeItem(DRIVE_TOKEN_KEY); throw new Error("등록 실패 HTTP " + r.status); }
+    return id;
+  }
+
+  async function renderImggen() {
+    const post = (url, body) => fetchJson(url, { method: "POST", headers: { "Content-Type": "application/json", "X-Naeba-Confirm": "1" }, body: JSON.stringify(body) });
+    let models = [], snap = null, jobs = [], total = 0, timer = null, userClicked = false, offset = 0;
+    const PAGE = 24;
+    const msg = el("div", { class: "note" });
+    const area = el("textarea", { class: "arena-input", rows: "5", placeholder: "한 줄에 프롬프트 1개 (최대 30개, 영어 권장)\n예) a red apple on a wooden table, studio light" });
+    const count = el("div", { class: "note" });
+    const modelBox = el("div", { class: "row", style: "margin:6px 0" });
+    const sizeSel = el("select", { class: "arena-input", style: "width:auto" }, [768, 1024].map((v) => el("option", { value: v, selected: v === 1024 }, v + "×" + v)));
+    const progress = el("div", { class: "card" }, el("div", { class: "note" }, "진행 상태 불러오는 중…"));
+    const histBox = el("div", { class: "imggrid" });
+    const moreBtn = el("button", { class: "ghost", style: "display:none", onclick: () => { offset += PAGE; loadHist(true); } }, "더 보기");
+    const q = el("input", { class: "arena-input", type: "text", placeholder: "프롬프트 검색", style: "flex:2;min-width:140px;margin:0", oninput: () => { offset = 0; loadHist(); } });
+    const dt = el("input", { class: "arena-input", type: "date", style: "flex:1;min-width:130px;margin:0", onchange: () => { offset = 0; loadHist(); } });
+    const st = el("select", { class: "arena-input", style: "flex:1;min-width:90px;margin:0", onchange: () => { offset = 0; loadHist(); } },
+      el("option", { value: "" }, "전체 상태"), Object.entries(IMG_STATUS).map(([k, v]) => el("option", { value: k }, v)));
+    const checks = () => [...modelBox.querySelectorAll("input[data-m]")];
+    function drawModels() {
+      const usable = models.filter((m) => m.usable);
+      const all = el("input", { type: "checkbox", onchange: (e) => checks().forEach((c) => (c.checked = e.target.checked)) });
+      modelBox.replaceChildren(el("label", { class: "chk" }, all, "전체 선택(" + usable.length + ")"),
+        ...models.map((m) => el("label", { class: "chk" + (m.usable ? "" : " state-off") }, el("input", { type: "checkbox", "data-m": m.id, disabled: !m.usable, checked: m.usable && m.id === (models.find((x) => x.usable) || {}).id }), m.label + (m.usable ? "" : " (사용 불가)"))));
+    }
+    function upd() { const r = parsePrompts(area.value); count.textContent = r.prompts.length + "개 인식" + (r.truncated ? " — 30개 초과분은 제외됩니다" : "") + (r.tooLong ? " — 600자 넘는 줄이 있습니다" : ""); }
+    area.addEventListener("input", upd); upd();
+
+    async function submit() {
+      const r = parsePrompts(area.value); const sel = checks().filter((c) => c.checked).map((c) => c.dataset.m);
+      if (!r.prompts.length) { msg.textContent = "프롬프트를 입력하세요."; return; }
+      if (r.tooLong) { msg.textContent = "600자 넘는 줄이 있습니다."; return; }
+      if (!sel.length) { msg.textContent = "모델을 하나 이상 선택하세요."; return; }
+      const spec = sel.length === models.filter((m) => m.usable).length && sel.length > 1 ? "all" : sel.join(","), w = parseInt(sizeSel.value, 10);
+      sub.disabled = true;
+      try {
+        if (INTERNAL) { const res = await post("api/imggen/submit", { prompts: r.prompts, models: spec, w, h: w }); if (!res.ok) throw new Error(res.error); msg.textContent = `✅ ${res.job_ids.length}건 예약됨 (프롬프트 ${res.prompts} × 모델 ${res.models.length}) — my-50 부하를 보며 순차 생성합니다.`; tick(); }
+        else { await postImgRequest(r.prompts, spec, w, w); msg.textContent = "✅ 요청 등록됨 — 집 와이파이 쪽 내바가 2분 안에 접수해 순차 생성합니다. 진행 상태는 몇 분 간격으로 갱신됩니다."; }
+        area.value = ""; upd();
+      } catch (e) { msg.textContent = "오류: " + e.message; }
+      sub.disabled = false;
+    }
+    const sub = el("button", { onclick: submit }, "예약 등록");
+
+    async function loadStatus() {
+      if (INTERNAL) {
+        const s = await fetchJson("api/imggen/status"); if (s.ok === false) throw new Error(s.error); return s;
+      }
+      snap = await loadDriveJson(IMG_SNAP, true);
+      return { overall_pct: snap.overall_pct, eta_sec: snap.eta_sec, counts: snap.counts, paused: snap.paused, worker: snap.worker, running: (snap.jobs.find((j) => j.status === "running") || null), snapAt: snap.generated_at };
+    }
+    function drawProgress(s) {
+      const c = s.counts || {}, run = s.running, w = s.worker || {};
+      const act = { run: "생성 중", rest: "휴식(부하 조절)", hold: "대기 — " + (w.reason || ""), idle: "대기 작업 없음", paused: "일시정지" }[w.action] || "알 수 없음(워커 미가동?)";
+      const bar = el("div", { class: "bar" }, el("i", { class: pctClass(s.overall_pct || 0), style: `width:${s.overall_pct || 0}%` }));
+      const kids = [el("h2", {}, "생성 진행"), el("div", { class: "metric" }, el("span", { class: "k" }, "전체"), bar, el("span", { class: "v" }, Math.round(s.overall_pct || 0) + "%")),
+        el("div", { class: "note" }, `대기 ${c.queued || 0} · 생성 중 ${c.running || 0} · 완료 ${c.done || 0} · 실패 ${c.error || 0} · 남은 시간 약 ${fmtEta(s.eta_sec)}`),
+        el("div", { class: "note" }, "my-50 상태: ", el("b", {}, act), w.temp ? ` · ${w.temp}℃` : "")];
+      if (run) kids.push(el("div", { class: "note" }, `지금: #${run.id} ${run.model} ${run.step || 0}/${run.steps || "?"}단계 (${Math.round(run.pct || 0)}%) — ${run.prompt.slice(0, 60)}`));
+      if (s.snapAt) kids.push(el("div", { class: "note" }, "외부 보기는 몇 분 간격 갱신: " + s.snapAt.replace("T", " ").slice(0, 16)));
+      if (INTERNAL) kids.push(el("div", { class: "row" }, el("button", { class: "ghost", onclick: async () => { await post("api/imggen/pause", { on: !s.paused }); tick(); } }, s.paused ? "▶ 재개" : "⏸ 일시정지"),
+        el("button", { class: "danger", onclick: async () => { if (confirm("대기 중인 작업을 모두 취소할까요?")) { await post("api/imggen/cancel", { all: true }); tick(); } } }, "대기 전체 취소")));
+      progress.replaceChildren(...kids);
+      return (c.queued || 0) + (c.running || 0) > 0;
+    }
+    function card(j) {
+      const img = el("img", { class: "thumb", alt: "", loading: "lazy" });
+      const open = async () => {
+        try { const u = INTERNAL ? "api/imggen/img/" + j.id + "/full" : await driveBlobUrl(j.f); window.open(u, "_blank"); } catch (e) { msg.textContent = "열기 실패: " + e.message; }
+      };
+      if (j.status === "done") {
+        if (INTERNAL) img.src = "api/imggen/img/" + j.id + "/thumb";
+        else if (j.t) driveBlobUrl(j.t).then((u) => (img.src = u)).catch(() => (img.alt = "로그인 필요"));
+      }
+      const cls = j.status === "error" ? "state-err" : j.status === "done" ? "" : "state-off";
+      return el("div", { class: "imgcard" }, j.status === "done" ? el("div", { onclick: open, style: "cursor:pointer" }, img) : el("div", { class: "thumb ph " + cls }, IMG_STATUS[j.status] + (j.status === "running" ? " " + Math.round(j.pct || 0) + "%" : "")),
+        el("div", { class: "cap" }, j.prompt), el("div", { class: "note" }, `#${j.id} ${j.model} · ${(j.created || "").replace("T", " ").slice(5, 16)}` + (j.dur_sec ? ` · ${Math.round(j.dur_sec)}초` : "")),
+        j.status === "error" ? el("div", { class: "note state-err" }, (j.error || "").slice(0, 80)) : null);
+    }
+    async function loadHist(append) {
+      try {
+        let list;
+        if (INTERNAL) {
+          const p = new URLSearchParams({ limit: PAGE, offset }); if (q.value.trim()) p.set("q", q.value.trim()); if (dt.value) p.set("date", dt.value); if (st.value) p.set("status", st.value);
+          const r = await fetchJson("api/imggen/jobs?" + p); if (r.ok === false) throw new Error(r.error); list = r.jobs; total = r.total;
+        } else {
+          if (!snap) return;
+          const kw = q.value.trim().toLowerCase();
+          const all = snap.jobs.filter((j) => (!kw || j.prompt.toLowerCase().includes(kw)) && (!dt.value || (j.created || "").startsWith(dt.value)) && (!st.value || j.status === st.value));
+          total = all.length; list = all.slice(offset, offset + PAGE);
+        }
+        jobs = append ? jobs.concat(list) : list;
+        histBox.replaceChildren(...(jobs.length ? jobs.map(card) : [el("div", { class: "note" }, "조건에 맞는 이력이 없습니다.")]));
+        moreBtn.style.display = offset + PAGE < total ? "" : "none";
+      } catch (e) { histBox.replaceChildren(el("div", { class: "card state-err" }, "이력 조회 실패: " + e.message)); }
+    }
+    async function tick() {
+      let busy = false;
+      try {
+        if (!INTERNAL && !sessionStorage.getItem(DRIVE_TOKEN_KEY) && !userClicked) {
+          progress.replaceChildren(el("button", { onclick: () => { userClicked = true; tick(); } }, "구글 로그인하고 진행·이력 보기")); return;
+        }
+        busy = drawProgress(await loadStatus());
+        if (!jobs.length || busy || !INTERNAL) await loadHist(false);
+      } catch (e) { userClicked = false; progress.replaceChildren(el("div", { class: "state-err" }, "조회 실패: " + e.message), el("button", { onclick: () => { userClicked = true; tick(); } }, "다시 시도")); }
+      clearTimeout(timer);
+      if (location.hash.startsWith("#/21")) timer = setTimeout(tick, busy ? (INTERNAL ? 3000 : 60000) : 30000);
+    }
+
+    const form = el("div", { class: "card" }, el("h2", {}, "새 이미지"), area, count, modelBox,
+      el("div", { class: "row", style: "align-items:center" }, sizeSel, sub), msg,
+      el("div", { class: "note" }, "예약된 작업은 my-50 이 온도·메모리·부하를 보면서 한 장씩 천천히 만듭니다(과열 시 자동 대기). 빠르게 만드는 것보다 my-50 보호가 우선입니다."));
+    $app.replaceChildren(topbar("🎨 이미지 생성", true), el("div", { class: "view" }, form, progress, el("h2", {}, "이력"), el("div", { class: "row", style: "margin:0 0 10px" }, q, dt, st), histBox, el("div", { class: "row" }, moreBtn)));
+    if (INTERNAL) { try { const m = await fetchJson("api/imggen/models"); if (m.ok === false) throw new Error(m.error); models = m.models; } catch (e) { msg.textContent = "모델 목록 실패: " + e.message; } }
+    else models = [{ id: "all", label: "서버 기본 모델", usable: true }];
+    drawModels();
+    await tick();
+  }
+
   // ----- 라우팅 -----
   function route() {
     const no = parseInt((location.hash.match(/^#\/(\d+)/) || [])[1], 10);
     const m = MENUS.menus.find((x) => x.no === no);
     if (!m) return renderHome();
     if (isInternalNo(no, MENUS.internalMax) && !INTERNAL) return renderHome();
-    return m.view === "laptop" ? renderLaptop() : m.view === "padctl" ? renderPadctl() : m.view === "claude" ? renderClaude() : m.view === "arena" ? renderArena() : renderHome();
+    return m.view === "laptop" ? renderLaptop() : m.view === "padctl" ? renderPadctl() : m.view === "claude" ? renderClaude() : m.view === "arena" ? renderArena() : m.view === "my50" ? renderMy50() : m.view === "imggen" ? renderImggen() : renderHome();
   }
 
   fetchJson("menus.json").then((m) => { MENUS = m; window.addEventListener("hashchange", route); route(); })

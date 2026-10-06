@@ -54,3 +54,13 @@ pre.out { margin-top:10px; padding:10px; background:#161616; border-radius:8px; 
 .arena-item{flex-direction:column;align-items:flex-start;gap:2px;height:auto;padding:10px 14px}
 .arena-item .txt{font-size:1.05rem}
 details summary{margin:8px 0;cursor:pointer}
+
+/* 12번 my-50 사용량 · 21번 이미지 생성 */
+.tbl{width:100%;border-collapse:collapse;font-size:12px}.tbl th,.tbl td{padding:4px 6px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}.tbl th:first-child,.tbl td:first-child{text-align:left}
+.tbl th{color:var(--sub);font-weight:500}.tblwrap{max-height:340px;overflow:auto}
+.imggrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.imgcard{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:6px;overflow:hidden}
+.thumb{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:8px;background:#161616;display:block}.thumb.ph{display:flex;align-items:center;justify-content:center;font-size:13px}
+.imgcard .cap{font-size:12px;margin-top:6px;line-height:1.35;max-height:3.9em;overflow:hidden;word-break:break-word}
+.chk{display:inline-flex;align-items:center;gap:6px;font-size:14px;margin-right:10px}.chk input{width:18px;height:18px}
+textarea.arena-input{font:inherit;resize:vertical}

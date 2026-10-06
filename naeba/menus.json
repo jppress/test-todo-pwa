@@ -5,7 +5,9 @@
   "menus": [
     {"no": 1, "label": "노트북 사용", "icon": "💻", "view": "laptop"},
     {"no": 2, "label": "패드 화면 제어", "icon": "📺", "view": "padctl"},
+    {"no": 12, "label": "my-50 사용량", "icon": "🖥️", "view": "my50"},
     {"no": 11, "label": "클로드 사용량", "icon": "📈", "view": "claude"},
-    {"no": 17, "label": "아레나 AI", "icon": "🏟️", "view": "arena"}
+    {"no": 17, "label": "아레나 AI", "icon": "🏟️", "view": "arena"},
+    {"no": 21, "label": "이미지 생성", "icon": "🎨", "view": "imggen"}
   ]
 }
