@@ -737,14 +737,14 @@ if (typeof document !== "undefined") {
       const stale = Date.now() - Date.parse(snap.source_generated || snap.generated_at) > 30 * 60e3;
       const kids = [el("div", { class: "gen-at" }, "갱신 " + at + (stale ? " · ⚠ 요약이 30분 넘게 갱신되지 않았습니다" : ""))];
       if (tab === "now") {
-        const rows = snap.ten_min.slice(-12).reverse();
+        const rows = snap.ten_min.slice(0, 12);
         kids.push(...(rows.length ? rows.map((r) => card(r.win.slice(5) + " · " + r.device + "/" + r.claude, r.summary || r.brief)) : [el("div", { class: "card state-off" }, "10분 요약이 아직 없습니다.")]));
       } else if (tab === "today") {
-        const d = today(), hrs = snap.hourly.filter((h) => h.hour.startsWith(d)).reverse();
+        const d = today(), hrs = snap.hourly.filter((h) => h.hour.startsWith(d));
         kids.push(...(hrs.length ? hrs.map((h) => card(h.hour.slice(11) + "시 · " + h.device + "/" + h.claude, h.overview, h.detail)) : [el("div", { class: "card state-off" }, "오늘 시간 요약이 아직 없습니다.")]));
       } else if (tab === "daily") {
-        kids.push(...snap.daily.slice().reverse().map((x) => card(x.key, "", x.text)));
-      } else kids.push(...snap.weekly.slice().reverse().map((x) => card(x.key, "", x.text)));
+        kids.push(...snap.daily.map((x) => card(x.key, "", x.text)));
+      } else kids.push(...snap.weekly.map((x) => card(x.key, "", x.text)));
       body.replaceChildren(...kids);
     }
     async function load() {
