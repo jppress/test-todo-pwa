@@ -721,13 +721,49 @@ if (typeof document !== "undefined") {
     await tick();
   }
 
+  // ----- 13번: 종합상황판 (모아바 72번 요약 · 10분 갱신) -----
+  async function renderBriefboard() {
+    let snap = null, tab = "now", timer = null;
+    const body = el("div", {}, el("div", { class: "note" }, "불러오는 중…"));
+    const tabs = el("div", { class: "row", style: "margin:0 0 10px" });
+    const TABS = [["now", "지금"], ["today", "오늘"], ["daily", "일간"], ["weekly", "주간"]];
+    $app.replaceChildren(topbar("🧭 종합상황판", true), el("div", { class: "view" }, tabs, body));
+    const card = (head, text, sub) => el("div", { class: "card" }, el("h2", {}, head), el("div", {}, text || ""), sub ? el("div", { class: "note" }, sub) : null);
+    const today = () => new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10);
+    function draw() {
+      tabs.replaceChildren(...TABS.map(([k, l]) => el("button", { class: k === tab ? "" : "ghost", onclick: () => { tab = k; draw(); } }, l)));
+      if (!snap) return;
+      const at = (snap.generated_at || "").replace("T", " ").slice(0, 16);
+      const stale = Date.now() - Date.parse(snap.source_generated || snap.generated_at) > 30 * 60e3;
+      const kids = [el("div", { class: "gen-at" }, "갱신 " + at + (stale ? " · ⚠ 요약이 30분 넘게 갱신되지 않았습니다" : ""))];
+      if (tab === "now") {
+        const rows = snap.ten_min.slice(-12).reverse();
+        kids.push(...(rows.length ? rows.map((r) => card(r.win.slice(5) + " · " + r.device + "/" + r.claude, r.summary || r.brief)) : [el("div", { class: "card state-off" }, "10분 요약이 아직 없습니다.")]));
+      } else if (tab === "today") {
+        const d = today(), hrs = snap.hourly.filter((h) => h.hour.startsWith(d)).reverse();
+        kids.push(...(hrs.length ? hrs.map((h) => card(h.hour.slice(11) + "시 · " + h.device + "/" + h.claude, h.overview, h.detail)) : [el("div", { class: "card state-off" }, "오늘 시간 요약이 아직 없습니다.")]));
+      } else if (tab === "daily") {
+        kids.push(...snap.daily.slice().reverse().map((x) => card(x.key, "", x.text)));
+      } else kids.push(...snap.weekly.slice().reverse().map((x) => card(x.key, "", x.text)));
+      body.replaceChildren(...kids);
+    }
+    async function load() {
+      try { snap = INTERNAL ? await fetchJson("api/briefboard") : await loadDriveJson("naeba_briefboard.json", true); if (snap.ok === false) throw new Error(snap.error); draw(); }
+      catch (e) { body.replaceChildren(el("div", { class: "card state-err" }, "조회 실패: " + e.message)); }
+      clearTimeout(timer);
+      if (location.hash.startsWith("#/13")) timer = setTimeout(load, 600000);
+    }
+    draw();
+    await load();
+  }
+
   // ----- 라우팅 -----
   function route() {
     const no = parseInt((location.hash.match(/^#\/(\d+)/) || [])[1], 10);
     const m = MENUS.menus.find((x) => x.no === no);
     if (!m) return renderHome();
     if (isInternalNo(no, MENUS.internalMax) && !INTERNAL) return renderHome();
-    return m.view === "laptop" ? renderLaptop() : m.view === "padctl" ? renderPadctl() : m.view === "claude" ? renderClaude() : m.view === "arena" ? renderArena() : m.view === "my50" ? renderMy50() : m.view === "imggen" ? renderImggen() : renderHome();
+    return m.view === "laptop" ? renderLaptop() : m.view === "padctl" ? renderPadctl() : m.view === "claude" ? renderClaude() : m.view === "arena" ? renderArena() : m.view === "my50" ? renderMy50() : m.view === "imggen" ? renderImggen() : m.view === "briefboard" ? renderBriefboard() : renderHome();
   }
 
   fetchJson("menus.json").then((m) => { MENUS = m; window.addEventListener("hashchange", route); route(); })
