@@ -1,6 +1,6 @@
 // 같은 origin 의 todo PWA 캐시를 건드리지 않도록 naeba-shell- 접두사만 정리. 앱 셸만 캐시(네트워크 우선, 실패 시 캐시). API·Drive·config 는 절대 캐시하지 않는다.
-const CACHE = "naeba-shell-v1";
-const SHELL = ["./", "./index.html", "./app.js", "./style.css", "./menus.json", "./manifest.json", "./icon.svg"];
+const CACHE = "naeba-shell-v2";
+const SHELL = ["./", "./index.html", "./app.js", "./arc3.js", "./style.css", "./menus.json", "./manifest.json", "./icon.svg"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", (e) => {
   e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k.startsWith("naeba-shell-") && k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()));

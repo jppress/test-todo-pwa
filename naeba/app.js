@@ -212,6 +212,7 @@ if (typeof document !== "undefined") {
   function displaySlotLabel(a) {
     if (a.id === "acct1" || a.id === "browser_vm") return "1번";
     if (a.id === "acct2" || a.id === "browser_vm2") return "2번";
+    if (a.id === "acct3") return "3번(acct3)";  // 2026-11-18 계정2 → acct3 교체
     return a.label || a.id;
   }
 
@@ -335,8 +336,10 @@ if (typeof document !== "undefined") {
 
   function toSnapshotShape(points) {
     const byLabel = {};
-    for (const p of points) (byLabel[p.device_label] ||= []).push(p);
-    const accounts = Object.keys(byLabel).sort().map((label) => {
+    // 2026-11-18 하나 님 지시: 2번(browser_vm2) 대신 acct3 표시 — 숨길 라벨은 CFG.usageHide 로 바꿀 수 있다.
+    const hide = new Set(CFG.usageHide || ["browser_vm2"]);
+    for (const p of points) if (!hide.has(p.device_label)) (byLabel[p.device_label] ||= []).push(p);
+    const accounts = Object.keys(byLabel).sort((x, y) => displaySlotLabel({ id: x }).localeCompare(displaySlotLabel({ id: y }))).map((label) => {
       const pts = byLabel[label].slice().sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
       const resets = [];
       let prev = null;
@@ -564,6 +567,48 @@ if (typeof document !== "undefined") {
     await load();
   }
 
+  // ----- 3번: 온도·습도 (습도계 로그 — 최근 값 · 24시간 그래프 · 최근 100건) -----
+  async function renderHumidity() {
+    const body = el("div", {}, el("div", { class: "note" }, "불러오는 중…"));
+    $app.replaceChildren(topbar("🌡️ 온도 습도", true), el("div", { class: "view" }, body));
+    let timer = null;
+    async function load() {
+      try {
+        const r = await fetchJson("api/humidity");
+        if (r.ok === false) throw new Error(r.error);
+        const last = r.latest;
+        if (!last) { body.replaceChildren(el("div", { class: "card state-off" }, "아직 기록이 없습니다(습도계 보고 대기).")); return; }
+        const tile = (l, v, sub, color) => el("div", { class: "tile" }, el("div", { class: "l" }, el("i", { class: "d", style: "background:" + color }), l), el("div", { class: "n" }, v), el("div", { class: "s" }, sub));
+        const low = last.battery !== null && last.battery !== undefined && last.battery <= 20;
+        const tiles = el("div", { class: "tiles" },
+          tile("온도", metricNum(last.temperature, 1) + "℃", "", "var(--s3)"), tile("습도", metricNum(last.humidity, 1) + "%", "", "var(--s1)"),
+          tile("로그 일시", last.ts.slice(5, 16).replace("T", " "), "", "var(--s2)"), tile("배터리", metricNum(last.battery) + "%", low ? "⚠ 교체 필요" : "", "var(--s2)"));
+        const pts = r.points;
+        const th = ["일시", "온도℃", "습도%", "배터리%"];
+        const table = el("table", { class: "tbl" }, el("thead", {}, el("tr", {}, th.map((h) => el("th", {}, h)))),
+          el("tbody", {}, r.rows.map((p) => el("tr", {}, [p.ts.slice(5, 19).replace("T", " "), metricNum(p.temperature, 1), metricNum(p.humidity, 1), metricNum(p.battery)].map((v) => el("td", {}, v))))));
+        const scr = el("div", { class: "card" }, el("h2", {}, "my-70 화면"));
+        const scrNote = el("div", { class: "note" }, "확인 중…");
+        const btn = (label, on) => el("button", { class: "btn", onclick: async () => {
+          if (!INTERNAL) return;
+          scrNote.textContent = "처리 중…";
+          try { const q = await fetchJson("api/my70/screen", { method: "POST", headers: { "Content-Type": "application/json", "X-Naeba-Confirm": "1" }, body: JSON.stringify({ on }) }); if (q.ok === false) throw new Error(q.error); showScr(q); }
+          catch (e) { scrNote.textContent = "실패: " + e.message; }
+        } }, label);
+        const showScr = (q) => { scrNote.textContent = (q.on ? "켜짐" : "꺼짐") + ` (밝기 ${q.percent}%)`; };
+        scr.append(scrNote, el("div", { style: "display:flex;gap:8px;margin-top:6px" }, btn("화면 끄기", false), btn("화면 켜기", true)));
+        fetchJson("api/my70/screen").then((q) => { if (q.ok === false) throw new Error(q.error); showScr(q); }).catch((e) => { scrNote.textContent = "상태 조회 실패: " + e.message; });
+        body.replaceChildren(el("div", { class: "gen-at" }, `최근 기록 ${last.ts.replace("T", " ").slice(0, 16)} · 최근 24시간 ${r.count_24h}건(그래프는 5분 평균)`), tiles, scr,
+          lineChart("온도", pts, [{ key: "temperature", name: "온도", color: "var(--s3)" }], { min: 0, max: 40, unit: "℃" }),
+          lineChart("습도", pts, [{ key: "humidity", name: "습도", color: "var(--s1)" }], { min: 0, max: 100, unit: "%" }),
+          el("div", { class: "card" }, el("h2", {}, `로그 목록 (최근 ${r.rows.length}건)`), el("div", { class: "tblwrap" }, table), el("div", { class: "note" }, "보고는 값이 바뀔 때마다 기록됩니다(고정 간격 아님).")));
+      } catch (e) { body.replaceChildren(el("div", { class: "card state-err" }, "조회 실패: " + e.message)); }
+      clearTimeout(timer);
+      if (/^#\/3(\/|$)/.test(location.hash)) timer = setTimeout(load, 60000);
+    }
+    await load();
+  }
+
   // ----- 21번: 이미지 생성 (my-50 큐 · 부하 자동 조절 · 이력) -----
   const IMG_SNAP = "naeba_imggen.json";
   const IMG_STATUS = { queued: "대기", running: "생성 중", done: "완료", error: "실패", canceled: "취소" };
@@ -757,13 +802,129 @@ if (typeof document !== "undefined") {
     await load();
   }
 
+  // ----- 14번: 지식기반 클로드 (대화기억 · 이력 · 설정) — 내부=데몬 프록시, 외부=이력 스냅샷(Drive) 조회만 -----
+  async function renderKb() {
+    const KBH = { "Content-Type": "application/json", "X-Naeba-Confirm": "1" };
+    const kbPost = async (path, body, ms) => {
+      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), ms || 60000);
+      try { const r = await fetch("api/kb/" + path, { method: "POST", headers: KBH, body: JSON.stringify(body || {}), signal: ctl.signal }); if (!r.ok) throw new Error("HTTP " + r.status); return await r.json(); }
+      finally { clearTimeout(t); }
+    };
+    const tabsEl = el("div", { class: "row", style: "margin:0 0 10px" });
+    const body = el("div", {});
+    const TABS = INTERNAL ? [["chat", "대화"], ["hist", "이력"], ["mem", "기억"], ["set", "설정"]] : [["hist", "이력"]];
+    let tab = TABS[0][0], timer = null;
+    $app.replaceChildren(topbar("🧠 지식기반 클로드", true), el("div", { class: "view" }, tabsEl, body));
+    const drawTabs = () => tabsEl.replaceChildren(...TABS.map(([k, l]) => el("button", { class: k === tab ? "" : "ghost", onclick: () => { tab = k; show(); } }, l)));
+    const hm = (t) => (t || "").slice(5, 16).replace("T", " ");
+    const show = () => { clearTimeout(timer); drawTabs(); body.replaceChildren(el("div", { class: "note" }, "불러오는 중…")); (tab === "chat" ? chat : tab === "hist" ? hist : tab === "mem" ? memory : sett)().catch((e) => body.replaceChildren(el("div", { class: "card state-err" }, "조회 실패: " + e.message))); };
+
+    async function chat() {
+      const log = el("div", {}), stat = el("div", { class: "note" });
+      const inp = el("textarea", { class: "arena-input", rows: "3", placeholder: "질문을 입력하세요" });
+      const send = el("button", {}, "보내기"), newBtn = el("button", { class: "ghost" }, "저장하고 새 대화");
+      const bubble = (who, text, cls) => el("div", { class: "card " + (cls || "") }, el("div", { class: "note" }, who), el("div", { style: "white-space:pre-wrap" }, text));
+      async function status() {
+        const st = await fetchJson("api/kb/status"); if (st.ok === false) { stat.textContent = "데몬 연결 실패: " + st.error; return; }
+        const c = st.session, s = st.settings;
+        stat.textContent = (c ? "세션 " + c.sid + " · " + c.device + " · " + (c.model_id || c.model) + " · " + c.turns + "턴 · 경과 " + c.age_min + "분(" + c.rotate_min + "분에 요약·교체)" : "세션 없음 — 다음 질문 때 새로 시작 (" + s.exec_device + " · " + s.model + ")") + (st.last_limit ? " · ⚠ 한도: " + st.last_limit.text : "") + (st.notice ? " · " + st.notice : "");
+      }
+      send.addEventListener("click", async () => {
+        const text = inp.value.trim(); if (!text) return;
+        send.disabled = true; inp.value = ""; log.append(bubble("나", text)); const wait = bubble("클로드", "생각 중…", "state-off"); log.append(wait);
+        try {
+          const r = await kbPost("ask", { text }, 960000);
+          wait.replaceWith(r.ok ? bubble("클로드 · " + (r.model_id || r.model) + " · " + r.device + (r.notice ? " · " + r.notice : ""), r.text) : bubble("오류", r.limit ? "한도 도달: " + r.error : (r.error || "실패"), "state-err"));
+        } catch (e) { wait.replaceWith(bubble("오류", e.message, "state-err")); }
+        send.disabled = false; status();
+      });
+      newBtn.addEventListener("click", async () => { newBtn.disabled = true; try { await kbPost("rotate", {}, 300000); log.replaceChildren(); } catch (e) { stat.textContent = e.message; } newBtn.disabled = false; status(); });
+      body.replaceChildren(stat, log, inp, el("div", { class: "row" }, send, newBtn), el("div", { class: "note" }, "50분이 지나면 자동으로 요약·저장되고, 다음 질문부터 새 세션(최근 6시간 요약 + 직전 2턴 포함)으로 이어집니다."));
+      try { const t = await fetchJson("api/kb/turns"); for (const x of t.turns || []) log.append(bubble(x.role === "user" ? "나" : "클로드", x.text)); } catch (e) { /* 복원 실패는 무시 */ }
+      await status();
+    }
+
+    async function hist() {
+      let hours = 24;
+      const list = el("div", {}), head = el("div", {});
+      const hsel = el("select", { onchange: (e) => { hours = +e.target.value; load(); } }, ...[[6, "6시간"], [24, "24시간"], [72, "3일"], [336, "2주"]].map(([v, l]) => el("option", { value: v, selected: v === hours }, l)));
+      async function load() {
+        let rows, s300;
+        if (INTERNAL) { const r = await fetchJson("api/kb/log?hours=" + hours); if (r.ok === false) throw new Error(r.error); rows = r.rows; s300 = (rows[0] || {}).s300; }
+        else { const snap = await loadDriveJson("naeba_kb.json", true); const cut = new Date(Date.now() + 9 * 3600e3 - hours * 3600e3).toISOString().slice(0, 19); rows = snap.segments.filter((x) => x.t1 >= cut); s300 = snap.latest_s300; }
+        head.replaceChildren(el("div", { class: "card" }, el("h2", {}, "최근 6시간 요약"), el("div", {}, s300 || "기록 없음")));
+        list.replaceChildren(...(rows.length ? rows.map((r) => {
+          const det = el("div", { class: "note", style: "white-space:pre-wrap" });
+          const mk = (label, level) => el("button", { class: "ghost", onclick: async () => { det.textContent = "불러오는 중…"; try { const x = await fetchJson("api/kb/seg/" + r.id + "?level=" + level); det.textContent = x.text || x.error; } catch (e) { det.textContent = e.message; } } }, label);
+          return el("div", { class: "card" }, el("div", { class: "note" }, hm(r.t0) + " ~ " + hm(r.t1).slice(6) + " · " + r.id + (r.quality !== "ok" ? " · " + r.quality : "")), el("div", {}, r.s100), INTERNAL ? el("div", { class: "row" }, mk("상세", "detail"), mk("원문", "raw")) : null, det);
+        }) : [el("div", { class: "card state-off" }, "이 기간 이력이 없습니다.")]));
+      }
+      body.replaceChildren(el("div", { class: "row", style: "margin:0 0 10px" }, "기간 ", hsel), head, list);
+      await load();
+    }
+
+    async function memory() {
+      // 지식 소스(네이버 메모 등 등록형) → 분류 → 상세 · 종합상황판(연동형) 일간/주간
+      const out = el("pre", { class: "note", style: "white-space:pre-wrap" }, "불러오는 중…");
+      const get = async (path) => { out.textContent = "불러오는 중…"; try { const r = await fetchJson("api/kb/" + path); out.textContent = r.text || r.error || "(없음)"; } catch (e) { out.textContent = e.message; } };
+      const b = (label, path) => el("button", { class: "ghost", onclick: () => get(path) }, label);
+      const cats = ["생각·성찰", "기술·자동화", "학습·자기계발", "쇼핑·장보기", "투자·금융", "건강·수련", "뉴스·참고자료", "생활·행정", "업무·직장", "문화·창작", "가족·관계", "여행·장소"];
+      const sel = el("select", {}, ...cats.map((c) => el("option", { value: c }, c)));
+      const pinBox = el("div", {}), pinIn = el("input", { type: "text", placeholder: "고정할 내용(예: 보고는 3줄 요약 먼저)", style: "width:100%" });
+      async function drawPins() {
+        try {
+          const r = await fetchJson("api/kb/pins");
+          pinBox.replaceChildren(...(r.pins.length ? r.pins.map((p) => el("div", { class: "row", style: "align-items:center" }, el("span", { style: "flex:1" }, p.text), el("button", { class: "ghost", onclick: async () => { await kbPost("pin", { op: "del", id: p.id }); drawPins(); } }, "삭제"))) : [el("div", { class: "note" }, "고정 기억 없음")]));
+        } catch (e) { pinBox.textContent = e.message; }
+      }
+      body.replaceChildren(
+        el("div", { class: "card" }, el("h2", {}, "고정 기억 (새 세션 카드에 항상 포함, 최대 5줄)"), pinBox, pinIn,
+          el("div", { class: "row" }, el("button", { onclick: async () => { if (pinIn.value.trim()) { await kbPost("pin", { text: pinIn.value }); pinIn.value = ""; drawPins(); } } }, "고정"),
+            b("일·주 요약", "days?n=7"), b("지표", "stats")),
+          el("div", { class: "note" }, "채팅에서 \"기억해: …\" 라고 입력해도 등록됩니다(토큰 0).")),
+        el("div", { class: "card" }, el("h2", {}, "지식 소스"), el("div", { class: "row" }, b("소스 목록", "src"), b("네이버 메모 개요", "mem?src=naver-memo"), b("연도·방법 상세", "mem?src=naver-memo&level=detail")),
+          el("div", { class: "row", style: "margin-top:8px" }, sel, el("button", { class: "ghost", onclick: () => get("mem?src=naver-memo&cat=" + encodeURIComponent(sel.value) + "&level=detail") }, "분류 상세"))),
+        el("div", { class: "card" }, el("h2", {}, "모아바 종합상황판 연동"), el("div", { class: "row" }, b("일간", "brief?level=daily&n=5"), b("주간", "brief?level=weekly&n=4"), b("시간", "brief?level=hourly&n=10"))),
+        out);
+      drawPins();
+      await get("src");
+    }
+
+    async function sett() {
+      const r = await fetchJson("api/kb/settings"); if (r.ok === false) throw new Error(r.error);
+      const dv = await fetchJson("api/kb/devices"); const dmap = Object.fromEntries((dv.devices || []).map((d) => [d.id, d]));
+      const o = r.options; let s = { ...r.settings };
+      const sel = (key, opts, label) => el("select", { onchange: (e) => { s[key] = e.target.value; } }, ...opts.map(([v, l]) => el("option", { value: v, selected: String(s[key]) === String(v) }, l)));
+      const row = (label, ctl, note) => el("div", { class: "card" }, el("h2", {}, label), ctl, note ? el("div", { class: "note" }, note) : null);
+      const devOpt = (id) => [id, id + (dmap[id] ? (dmap[id].ok ? " ✓" : " ✗ " + (dmap[id].note || "응답 없음")) : "")];
+      const range = (key, lo, hi) => { const v = el("span", {}, " " + s[key]); return el("div", {}, el("input", { type: "range", min: lo, max: hi, value: s[key], oninput: (e) => { s[key] = +e.target.value; v.textContent = " " + s[key]; } }), v); };
+      const msg = el("div", { class: "note" });
+      const save = el("button", {}, "저장");
+      save.addEventListener("click", async () => { save.disabled = true; try { const x = await kbPost("settings", s); msg.textContent = x.ok ? "저장됨 — 모델·기기 변경은 다음 질문부터 새 세션에 적용됩니다." : (x.error || "실패"); if (x.ok) s = { ...x.settings }; } catch (e) { msg.textContent = e.message; } save.disabled = false; });
+      body.replaceChildren(
+        row("모델", sel("model", o.models.map((m) => [m.id, m.label + " (" + m.id + ")"])), "별칭은 최신 버전으로 자동 해석됩니다. 변경은 다음 질문 시점의 새 세션부터."),
+        row("실행 기기", sel("exec_device", o.exec_devices.map(devOpt)), "대화 세션을 실행할 기기. 서버 기능(요약·이력)은 항상 dev-vm."),
+        row("대체 기기", sel("fallback_device", o.exec_devices.map(devOpt)), "실행 기기가 응답하지 않을 때 자동으로 쓸 기기(한도 도달 시에는 전환하지 않음)."),
+        row("요약 생성기", sel("summarizer", [["local", "my-50 로컬 LLM (기본, 실패 시 세션→추출)"], ["session", "클로드 세션 자신 (실패 시 로컬→추출)"]]), "50분 회전 요약을 만드는 곳. 로컬은 대화가 외부로 나가지 않고 클로드 토큰을 쓰지 않습니다."),
+        row("역질문 코칭", sel("coach", [["off", "끄기"], ["ambiguous", "모호할 때만"], ["always", "항상"]]), "질문 수 상한 " + s.coach_max_q + "개"),
+        row("답변 길이 다이얼 (1 짧게 ~ 5 자세히)", range("dial_len", 1, 5)),
+        row("태도 다이얼 (1 보수적 ~ 5 과감)", range("dial_bold", 1, 5)),
+        row("종합상황판 연동", el("label", {}, el("input", { type: "checkbox", checked: s.link_brief, onchange: (e) => { s.link_brief = e.target.checked; } }), " 새 세션 카드에 다른 클로드들의 최근 6시간 활동 요약 포함")),
+        row("기반 인프라 카드", el("label", {}, el("input", { type: "checkbox", checked: s.infra_card, onchange: (e) => { s.infra_card = e.target.checked; } }), " 새 세션에 기기 목록·접근 방법 주입")),
+        row("이월 턴 수", range("carry_turns", 0, 6), "새 세션 첫 입력에 넣을 직전 대화 턴 수(기본 2)"),
+        row("요약·교체 주기(분)", range("rotate_min", 10, 55), "기본 50분 — 프롬프트 캐시 1시간 안쪽"),
+        el("div", { class: "row" }, save), msg);
+    }
+    show();
+  }
+
   // ----- 라우팅 -----
   function route() {
     const no = parseInt((location.hash.match(/^#\/(\d+)/) || [])[1], 10);
     const m = MENUS.menus.find((x) => x.no === no);
     if (!m) return renderHome();
     if (isInternalNo(no, MENUS.internalMax) && !INTERNAL) return renderHome();
-    return m.view === "laptop" ? renderLaptop() : m.view === "padctl" ? renderPadctl() : m.view === "claude" ? renderClaude() : m.view === "arena" ? renderArena() : m.view === "my50" ? renderMy50() : m.view === "imggen" ? renderImggen() : m.view === "briefboard" ? renderBriefboard() : renderHome();
+    return m.view === "laptop" ? renderLaptop() : m.view === "padctl" ? renderPadctl() : m.view === "claude" ? renderClaude() : m.view === "arena" ? renderArena() : m.view === "my50" ? renderMy50() : m.view === "humidity" ? renderHumidity() : m.view === "imggen" ? renderImggen() : m.view === "kb" ? renderKb() : m.view === "briefboard" ? renderBriefboard() : m.view === "arc3" ? window.NAEBA_ARC3.render({ el, topbar, $app, fetchJson, INTERNAL }) : renderHome();
   }
 
   fetchJson("menus.json").then((m) => { MENUS = m; window.addEventListener("hashchange", route); route(); })
